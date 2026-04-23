@@ -1,30 +1,28 @@
 name: Deploy Backend
 
 on:
-push:
-branches:
-- main
+  push:
+    branches:
+      - main
 
 jobs:
-deploy:
-runs-on: ubuntu-latest
+  deploy:
+    runs-on: ubuntu-latest
 
-```
-steps:
-  - uses: actions/checkout@v4
+    steps:
+      - uses: actions/checkout@v4
 
-  - uses: actions/setup-node@v4
-    with:
-      node-version: '18.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18.x
 
-  - name: Install dependencies
-    working-directory: backend
-    run: npm install
+      - name: Install dependencies
+        run: npm install
+        working-directory: backend
 
-  - name: Deploy to Azure Web App
-    uses: azure/webapps-deploy@v3
-    with:
-      app-name: smart-waste-management01
-      publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-      package: backend
-```
+      - name: Deploy
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: smart-waste-management01
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: backend
