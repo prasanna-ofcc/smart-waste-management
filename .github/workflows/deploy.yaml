@@ -1,4 +1,4 @@
-name: Deploy Backend to Azure
+name: Deploy Backend
 
 on:
 push:
@@ -11,23 +11,17 @@ runs-on: ubuntu-latest
 
 ```
 steps:
-  - name: Checkout code
-    uses: actions/checkout@v4
+  - uses: actions/checkout@v4
 
-  - name: Setup Node
-    uses: actions/setup-node@v4
+  - uses: actions/setup-node@v4
     with:
       node-version: '18.x'
 
-  - name: Install dependencies
-    working-directory: backend
+  - name: Install deps
     run: npm install
-
-  - name: Build app
     working-directory: backend
-    run: npm run build --if-present
 
-  - name: Deploy to Azure Web App
+  - name: Deploy
     uses: azure/webapps-deploy@v3
     with:
       app-name: smart-waste-management01
