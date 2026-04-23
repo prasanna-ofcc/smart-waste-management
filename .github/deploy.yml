@@ -1,0 +1,43 @@
+name: Deploy Backend to Azure
+
+on:
+push:
+branches:
+- main
+
+jobs:
+deploy:
+runs-on: ubuntu-latest
+
+```
+steps:
+  - name: Checkout code
+    uses: actions/checkout@v4
+
+  - name: Setup Node
+    uses: actions/setup-node@v3
+    with:
+      node-version: '18.x'
+
+  - name: Install dependencies
+    working-directory: backend
+    run: npm install
+
+  - name: Build app
+    working-directory: backend
+    run: npm run build --if-present
+
+  - name: Azure Login
+    uses: azure/login@v2
+    with:
+      client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_6BF20497B2A44479B627581B6F249D07 }}
+      tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_FC6BFBCC1CF44E958864DCF2765CD7AB }}
+      subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_4E64A2F6A55B411F9EF5F787BF915A99 }}
+
+  - name: Deploy to Azure
+    uses: azure/webapps-deploy@v3
+    with:
+      app-name: smart-waste-management01
+      slot-name: Production
+      package: backend
+```
