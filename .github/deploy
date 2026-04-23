@@ -1,4 +1,4 @@
-name: Deploy Node App to Azure
+name: Deploy Backend to Azure
 
 on:
 push:
@@ -20,10 +20,12 @@ steps:
       node-version: '18.x'
 
   - name: Install dependencies
-    run: cd backend && npm install
+    working-directory: backend
+    run: npm install
 
   - name: Build app
-    run: cd backend && npm run build --if-present
+    working-directory: backend
+    run: npm run build --if-present
 
   - name: Azure Login
     uses: azure/login@v2
