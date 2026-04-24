@@ -9,6 +9,9 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  build: {
+    outDir: 'build',
+  },
   server: {
     proxy: {
       '/api': 'http://localhost:4000',

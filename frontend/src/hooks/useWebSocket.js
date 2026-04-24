@@ -11,9 +11,8 @@ export function useWebSocket(onMessage) {
   useEffect(() => {
     function connect() {
       const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const host = window.location.hostname;
-      const port = 4000; // backend WS port
-      const ws = new WebSocket(`${protocol}://${host}:${port}`);
+      const host = window.location.host;
+      const ws = new WebSocket(`${protocol}://${host}`);
 
       ws.onopen = () => {
         console.log('[WS] Connected');

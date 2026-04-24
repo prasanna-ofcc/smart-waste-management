@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
+const path = require('path');
 
 const { createRealtime } = require('./realtime/socket');
 const { startBinFillSimulation } = require('./services/simulationService');
@@ -35,6 +36,16 @@ app.use('/api/profile', profileRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString(), database: 'supabase' });
+});
+
+const frontendBuildPath = path.resolve(__dirname, '../frontend/build');
+app.use(express.static(frontendBuildPath));
+
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    return next();
+  }
+  return res.sendFile(path.join(frontendBuildPath, 'index.html'));
 });
 
 app.use((_req, _res, next) => {
