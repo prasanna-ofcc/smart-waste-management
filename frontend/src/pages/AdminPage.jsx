@@ -48,6 +48,8 @@ export default function AdminPage() {
   const [requests,    setRequests]    = useState([]);
   const [events,      setEvents]      = useState([]);
   const [stats,       setStats]       = useState(null);
+  const [collectionSummary, setCollectionSummary] = useState(null);
+  const [selectedWorkerId, setSelectedWorkerId] = useState('all');
   const [loading,     setLoading]     = useState(true);
   const [addBinMode,  setAddBinMode]  = useState(false);
   const [binFilter,   setBinFilter]   = useState('all');   // 'all' | 'full' | 'empty'
@@ -56,30 +58,32 @@ export default function AdminPage() {
   // ── Load all data ────────────────────────────────────
   const fetchAll = useCallback(async () => {
     try {
-      const [bRes, wRes, rRes, eRes, sRes] = await Promise.all([
+      const [bRes, wRes, rRes, eRes, sRes, cRes] = await Promise.all([
         api.get('/bins'),
         api.get('/admin/workers'),
         api.get('/requests'),
         api.get('/admin/events'),
         api.get('/admin/stats'),
+        api.get('/analytics/collections/summary'),
       ]);
 
-      const normalizedBins = bRes.data.map((b) => ({
+      const normalizedBins = (Array.isArray(bRes.data) ? bRes.data : []).map((b) => ({
         ...b,
         fillPercent: typeof b.fill_level === 'number' ? b.fill_level : b.fillPercent || 0,
       }));
 
-      const normalizedWorkers = wRes.data.map((w) => ({
+      const normalizedWorkers = (Array.isArray(wRes.data) ? wRes.data : []).map((w) => ({
         ...w,
         avatar: (w.name || '?').slice(0, 1).toUpperCase(),
-        zone: w.zone || 'Unassigned',
+        zone: w.zone || (w.zone_id ? 'Assigned Zone' : 'Unassigned'),
+        assignmentStatus: w.assignment_status || (w.zone_id ? 'Active' : 'Unassigned'),
         location: {
           lat: w.location_lat,
           lng: w.location_lng,
         },
       }));
 
-      const normalizedRequests = rRes.data.map((r) => ({
+      const normalizedRequests = (Array.isArray(rRes.data) ? rRes.data : []).map((r) => ({
         ...r,
         name: r.name || 'Public User',
         createdAt: r.created_at,
@@ -88,9 +92,13 @@ export default function AdminPage() {
       setBins(normalizedBins);
       setWorkers(normalizedWorkers);
       setRequests(normalizedRequests);
-      setEvents(eRes.data);
-      setStats(sRes.data);
-    } catch { toast.error('Failed to load admin data.'); }
+      setEvents(Array.isArray(eRes.data) ? eRes.data : []);
+      setStats(sRes.data || null);
+      setCollectionSummary(cRes.data || null);
+    } catch (err) {
+      console.error('[ADMIN_FETCH_ERROR]', err);
+      toast.error('Failed to load admin data.');
+    }
     finally  { setLoading(false); }
   }, []);
 
@@ -243,7 +251,7 @@ export default function AdminPage() {
                         {events.slice(0, 8).map(ev => (
                           <tr key={ev.id}>
                             <td style={{ color: 'var(--text-primary)' }}>{ev.binLabel}</td>
-                            <td>{ev.workerId}</td>
+                            <td>{ev.workerName || ev.workerId}</td>
                             <td>{new Date(ev.timestamp).toLocaleString()}</td>
                           </tr>
                         ))}
@@ -362,7 +370,7 @@ export default function AdminPage() {
                         <td>{w.zone}</td>
                         <td style={{ fontSize: 11, fontFamily: 'monospace' }}>{w.location?.lat?.toFixed(5)}</td>
                         <td style={{ fontSize: 11, fontFamily: 'monospace' }}>{w.location?.lng?.toFixed(5)}</td>
-                        <td><span className="status-badge status-empty">● On Duty</span></td>
+                        <td><span className={`status-badge ${w.assignmentStatus === 'Active' ? 'status-empty' : 'status-pending'}`}>● {w.assignmentStatus}</span></td>
                       </tr>
                     ))}
                   </tbody>
@@ -471,11 +479,93 @@ export default function AdminPage() {
                   </div>
                 </div>
               </div>
+              {collectionSummary && (
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+                  <div className="card">
+                    <div className="card-header"><span className="card-title">📅 Day-wise Collections</span></div>
+                    <div className="card-body">
+                      <ResponsiveContainer width="100%" height={220}>
+                        <BarChart data={collectionSummary.dayWise} margin={{ top: 5, right: 10, bottom: 5, left: -20 }}>
+                          <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                          <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+                          <Tooltip content={<CustomTooltip />} />
+                          <Bar dataKey="count" name="Collections" radius={[4, 4, 0, 0]} fill="#22c55e" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                  <div className="card">
+                    <div className="card-header"><span className="card-title">🗓️ Month-wise Collections</span></div>
+                    <div className="card-body">
+                      <ResponsiveContainer width="100%" height={220}>
+                        <BarChart data={collectionSummary.monthWise} margin={{ top: 5, right: 10, bottom: 5, left: -20 }}>
+                          <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                          <YAxis tick={{ fontSize: 10 }} allowDecimals={false} />
+                          <Tooltip content={<CustomTooltip />} />
+                          <Bar dataKey="count" name="Collections" radius={[4, 4, 0, 0]} fill="#3b82f6" />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                </div>
+              )}
               {stats && (
                 <div className="stats-grid">
                   <StatCard icon="✅" value={stats.totalCollected} label="Total Collections" color="green"  />
                   <StatCard icon="📬" value={stats.totalRequests}  label="Total Requests"    color="amber"  />
                   <StatCard icon="🗑️" value={stats.totalBins}      label="Total Bins"        color="blue"   />
+                </div>
+              )}
+              {collectionSummary && (
+                <div className="content-grid">
+                  <div className="card">
+                    <div className="card-header"><span className="card-title">👷 Per-Worker Collections</span></div>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table className="data-table">
+                        <thead><tr><th>Worker</th><th>Total Collections</th></tr></thead>
+                        <tbody>
+                          {collectionSummary.perWorker.map((row) => (
+                            <tr key={row.workerId}>
+                              <td style={{ color: 'var(--text-primary)' }}>{row.workerName}</td>
+                              <td>{row.total}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div className="card">
+                    <div className="card-header">
+                      <span className="card-title">📋 Worker Collection Details</span>
+                      <select
+                        value={selectedWorkerId}
+                        onChange={(e) => setSelectedWorkerId(e.target.value)}
+                        style={{ marginLeft: 'auto' }}
+                      >
+                        <option value="all">All workers</option>
+                        {collectionSummary.perWorker.map((row) => (
+                          <option key={row.workerId} value={row.workerId}>{row.workerName}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table className="data-table">
+                        <thead><tr><th>Worker</th><th>Bin</th><th>Collected At (UTC)</th></tr></thead>
+                        <tbody>
+                          {collectionSummary.perWorkerDetails
+                            .filter((row) => selectedWorkerId === 'all' || row.workerId === selectedWorkerId)
+                            .slice(0, 20)
+                            .map((row) => (
+                              <tr key={row.id}>
+                                <td>{row.workerName}</td>
+                                <td>{row.binId}</td>
+                                <td>{new Date(row.collectedAt).toLocaleString('en-GB', { timeZone: 'UTC' })}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>

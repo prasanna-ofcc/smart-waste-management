@@ -58,6 +58,14 @@ async function assignWorkerToZone({ workerId, zoneId, assignedBy }) {
     .single();
 
   if (error) throw mapSupabaseError(error, 'Failed to assign worker to zone.');
+
+  const { error: workerUpdateError } = await supabase
+    .from('users')
+    .update({ zone_id: zoneId, worker_status: 'active', updated_at: new Date().toISOString() })
+    .eq('id', workerId)
+    .eq('role', 'worker');
+
+  if (workerUpdateError) throw mapSupabaseError(workerUpdateError, 'Failed to sync worker zone.');
   return data;
 }
 
@@ -66,19 +74,59 @@ async function setWorkerZones({ workerId, zoneIds, assignedBy }) {
   const { error: deleteError } = await supabase.from(mappingTable).delete().eq('worker_id', workerId);
   if (deleteError) throw mapSupabaseError(deleteError, 'Failed to reset worker zones.');
 
-  if (!zoneIds.length) return [];
+  if (!zoneIds.length) {
+    const { error: workerUpdateError } = await supabase
+      .from('users')
+      .update({ zone_id: null, worker_status: 'inactive', updated_at: new Date().toISOString() })
+      .eq('id', workerId)
+      .eq('role', 'worker');
+
+    if (workerUpdateError) throw mapSupabaseError(workerUpdateError, 'Failed to clear worker zone.');
+    return [];
+  }
 
   const rows = zoneIds.map((zoneId) => ({ worker_id: workerId, zone_id: zoneId, assigned_by: assignedBy }));
   const { data, error } = await supabase.from(mappingTable).insert(rows).select('*');
   if (error) throw mapSupabaseError(error, 'Failed to assign worker zones.');
+
+  const { error: workerUpdateError } = await supabase
+    .from('users')
+    .update({ zone_id: zoneIds[0], worker_status: 'active', updated_at: new Date().toISOString() })
+    .eq('id', workerId)
+    .eq('role', 'worker');
+
+  if (workerUpdateError) throw mapSupabaseError(workerUpdateError, 'Failed to sync worker zone.');
   return data;
+}
+
+async function getWorkerPrimaryZoneId(workerId) {
+  try {
+    const { data, error } = await supabase.from('users').select('zone_id').eq('id', workerId).maybeSingle();
+    if (error) {
+      // If column doesn't exist, fall back to mapping table
+      console.error('[GET_PRIMARY_ZONE_ERROR]', { workerId, message: error.message });
+    } else if (data?.zone_id) {
+      return data.zone_id;
+    }
+  } catch (err) {
+    console.error('[GET_PRIMARY_ZONE_EXCEPTION]', { workerId, message: err.message });
+  }
+
+  // Fallback: read mapping table (worker_zones / workers_zones)
+  const zoneIds = await getWorkerZoneIds(workerId);
+  return zoneIds[0] || null;
 }
 
 async function getWorkerZoneIds(workerId) {
   const mappingTable = await getWorkerZoneTable();
   const { data, error } = await supabase.from(mappingTable).select('zone_id').eq('worker_id', workerId);
-  if (error) throw mapSupabaseError(error, 'Failed to fetch worker zones.');
-  return data.map((row) => row.zone_id);
+  if (error) {
+    console.error('[GET_WORKER_ZONE_IDS_ERROR]', { workerId, error: error.message });
+    throw mapSupabaseError(error, 'Failed to fetch worker zones.');
+  }
+  const zoneIds = data.map((row) => row.zone_id);
+  console.log('[GET_WORKER_ZONE_IDS]', { workerId, zoneIds, count: zoneIds.length });
+  return zoneIds;
 }
 
 async function getAssignedZonesForWorker(workerId) {
@@ -101,5 +149,6 @@ module.exports = {
   assignWorkerToZone,
   setWorkerZones,
   getWorkerZoneIds,
+  getWorkerPrimaryZoneId,
   getAssignedZonesForWorker,
 };

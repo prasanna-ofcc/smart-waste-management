@@ -1,6 +1,7 @@
 const bcrypt = require('bcryptjs');
 const { supabase } = require('../db/supabase');
 const { AppError, mapSupabaseError } = require('../utils/errors');
+const { getWorkerPrimaryZoneId } = require('./zoneService');
 
 function isMissingColumnError(error, columnName) {
   const msg = String(error?.message || '').toLowerCase();
@@ -64,14 +65,28 @@ async function createWorker({ name, email, password, phone = '' }) {
 }
 
 async function listWorkers() {
-  const { data, error } = await supabase
-    .from('users')
-    .select('id,name,email,phone,role,worker_status,location_lat,location_lng,created_at,updated_at')
-    .eq('role', 'worker')
-    .order('created_at', { ascending: false });
+  const [{ data, error }, { data: zones, error: zonesError }] = await Promise.all([
+    supabase
+      .from('users')
+      .select('id,name,email,phone,role,worker_status,location_lat,location_lng,created_at,updated_at')
+      .eq('role', 'worker')
+      .order('created_at', { ascending: false }),
+    supabase.from('zones').select('id,name'),
+  ]);
 
   if (error) throw mapSupabaseError(error, 'Failed to fetch workers.');
-  return data;
+  if (zonesError) throw mapSupabaseError(zonesError, 'Failed to fetch zones.');
+
+  const zoneMap = new Map((zones || []).map((zone) => [zone.id, zone.name]));
+  return Promise.all((data || []).map(async (worker) => {
+    const zoneId = await getWorkerPrimaryZoneId(worker.id);
+    return {
+      ...worker,
+      zone_id: zoneId,
+      zone: zoneId ? (zoneMap.get(zoneId) || 'Assigned Zone') : 'Unassigned',
+      assignment_status: zoneId ? 'Active' : 'Unassigned',
+    };
+  }));
 }
 
 async function updateWorkerStatus(workerId, status) {

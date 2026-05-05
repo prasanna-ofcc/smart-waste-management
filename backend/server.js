@@ -15,6 +15,7 @@ const workerRoutes = require('./routes/workers');
 const requestRoutes = require('./routes/requests');
 const analyticsRoutes = require('./routes/analytics');
 const profileRoutes = require('./routes/profile');
+const routeProxyRoutes = require('./routes/route');
 
 const app = express();
 const server = http.createServer(app);
@@ -29,10 +30,12 @@ app.locals.broadcast = realtime.broadcast;
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/bins', binRoutes);
+app.use('/api/worker', workerRoutes);
 app.use('/api/workers', workerRoutes);
 app.use('/api/requests', requestRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/profile', profileRoutes);
+app.use('/api/route', routeProxyRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString(), database: 'supabase' });

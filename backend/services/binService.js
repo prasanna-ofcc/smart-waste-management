@@ -1,10 +1,10 @@
 const { supabase } = require('../db/supabase');
 const { AppError, mapSupabaseError } = require('../utils/errors');
-const { getWorkerZoneIds } = require('./zoneService');
+const { getWorkerZoneIds, getWorkerPrimaryZoneId } = require('./zoneService');
 const { logActivity, logWorker } = require('./activityService');
 
-const FILL_DURATION_MINUTES = 20;
-const COLLECTION_RADIUS_METERS = 10;
+const FILL_DURATION_MINUTES = 1;
+const COLLECTION_RADIUS_METERS = 50;
 const ALLOWED_BIN_STATUSES = new Set(['empty', 'full', 'collected']);
 
 function toRad(v) {
@@ -17,6 +17,19 @@ function distanceMeters(aLat, aLng, bLat, bLng) {
   const dLng = toRad(bLng - aLng);
   const x = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+}
+
+function parseCoordinate(value, fieldName) {
+  if (value === null || value === undefined || value === '') {
+    throw new AppError(`${fieldName} is required.`, 400);
+  }
+
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    throw new AppError(`${fieldName} must be a valid number.`, 400);
+  }
+
+  return numericValue;
 }
 
 function isMissingColumnError(error, columnName) {
@@ -40,14 +53,53 @@ async function listBinsForUser(user) {
   let query = supabase.from('bins').select('*').order('created_at', { ascending: false });
 
   if (user.role === 'worker') {
-    const zoneIds = await getWorkerZoneIds(user.id);
-    if (!zoneIds.length) return [];
+    const zoneIds = await getWorkerZoneFilterIds(user);
+    console.log('[BIN_QUERY_USER]', { userId: user.id, role: user.role, zoneIds });
+    if (!zoneIds.length) {
+      console.log('[BIN_QUERY_EMPTY]', { userId: user.id, reason: 'No zones assigned' });
+      return [];
+    }
     query = query.in('zone_id', zoneIds);
   }
 
   const { data, error } = await query;
-  if (error) throw mapSupabaseError(error, 'Failed to fetch bins.');
-  return data;
+  if (error) {
+    console.error('[BIN_QUERY_ERROR]', { userId: user.id, error: error.message });
+    throw mapSupabaseError(error, 'Failed to fetch bins.');
+  }
+  console.log('[BIN_QUERY_RESULT]', { userId: user.id, count: data?.length || 0, bins: data?.map(b => ({ id: b.id, zone_id: b.zone_id })) || [] });
+  return data || [];
+}
+
+async function getWorkerZoneFilterIds(worker) {
+  const mappingZoneIds = await getWorkerZoneIds(worker.id);
+  console.log('[ZONE_FILTER_STEP1]', { workerId: worker.id, mappingZoneIds });
+  if (mappingZoneIds.length) return mappingZoneIds;
+  const primaryZoneId = await getWorkerPrimaryZoneId(worker.id);
+  console.log('[ZONE_FILTER_STEP2]', { workerId: worker.id, primaryZoneId });
+  return primaryZoneId ? [primaryZoneId] : [];
+}
+
+async function listBinsForWorker(worker) {
+  const zoneIds = await getWorkerZoneFilterIds(worker);
+  console.log('[WORKER_BIN_QUERY]', { workerId: worker.id, zoneIds });
+  if (!zoneIds.length) {
+    console.log('[WORKER_BIN_QUERY_EMPTY]', { workerId: worker.id, reason: 'No zones assigned' });
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from('bins')
+    .select('*')
+    .in('zone_id', zoneIds)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('[WORKER_BIN_QUERY_ERROR]', { workerId: worker.id, error: error.message });
+    throw mapSupabaseError(error, 'Failed to fetch worker bins.');
+  }
+  console.log('[WORKER_BIN_QUERY_RESULT]', { workerId: worker.id, count: data?.length || 0, bins: data?.map(b => ({ id: b.id, zone_id: b.zone_id })) || [] });
+  return data || [];
 }
 
 async function addBin({ label, location, lat, lng, zoneId, createdBy }) {
@@ -147,38 +199,47 @@ async function removeBin({ binId, removedBy }) {
 }
 
 async function collectBin({ binId, worker }) {
-  const { data: bin, error: binError } = await supabase.from('bins').select('*').eq('id', binId).single();
+  const { data: bin, error: binError } = await supabase.from('bins').select('*').eq('id', binId).maybeSingle();
   if (binError) throw mapSupabaseError(binError, 'Failed to load bin.');
+  if (!bin) {
+    throw new AppError('Bin not found.', 404);
+  }
 
   if (bin.status !== 'full') {
     throw new AppError('Bin already collected or not ready for collection.', 409);
   }
 
-  if (!Number.isFinite(Number(bin.lat)) || !Number.isFinite(Number(bin.lng))) {
-    throw new AppError('Bin does not have valid GPS coordinates.', 400);
+  const binLat = parseCoordinate(bin.lat, 'Bin latitude');
+  const binLng = parseCoordinate(bin.lng, 'Bin longitude');
+  const workerLat = parseCoordinate(worker.location_lat, 'Worker latitude');
+  const workerLng = parseCoordinate(worker.location_lng, 'Worker longitude');
+
+  const proximityMeters = distanceMeters(workerLat, workerLng, binLat, binLng);
+  
+  console.log('[COLLECT_BIN_DEBUG]', {
+    binId,
+    workerId: worker.id,
+    binCoords: { lat: binLat, lng: binLng },
+    workerCoords: { lat: workerLat, lng: workerLng },
+    calculatedDistanceMeters: Math.round(proximityMeters * 100) / 100,
+    thresholdMeters: COLLECTION_RADIUS_METERS,
+    isWithinThreshold: proximityMeters <= COLLECTION_RADIUS_METERS,
+  });
+  
+  if (!Number.isFinite(proximityMeters)) {
+    throw new AppError('Distance calculation failed. Check worker and bin coordinates.', 400);
   }
 
-  const workerLat = Number(worker.location_lat);
-  const workerLng = Number(worker.location_lng);
-  if (!Number.isFinite(workerLat) || !Number.isFinite(workerLng)) {
-    throw new AppError('Worker location unavailable. Share live location before collecting.', 400);
-  }
-
-  const proximityMeters = distanceMeters(workerLat, workerLng, Number(bin.lat), Number(bin.lng));
   if (proximityMeters > COLLECTION_RADIUS_METERS) {
-    throw new AppError('Move closer to the bin to collect.', 400);
-  }
-
-  const { error: collectionsTableCheckError } = await supabase.from('collections').select('id').limit(1);
-  if (collectionsTableCheckError) {
-    if (isMissingTableError(collectionsTableCheckError, 'collections')) {
-      throw new AppError('Collections table not found. Run backend/db/schema.sql to enable collection logging.', 500);
-    }
-    throw mapSupabaseError(collectionsTableCheckError, 'Failed to validate collection storage.');
+    throw new AppError(
+      `Too far from bin. Distance: ${Math.round(proximityMeters)} meters. ` +
+      `Max allowed: ${COLLECTION_RADIUS_METERS} meters. Move closer to the bin to collect.`,
+      400
+    );
   }
 
   if (worker.role === 'worker') {
-    const zoneIds = await getWorkerZoneIds(worker.id);
+    const zoneIds = await getWorkerZoneFilterIds(worker);
     if (!zoneIds.includes(bin.zone_id)) {
       throw new AppError('You can only collect bins in your assigned zones.', 403);
     }
@@ -207,27 +268,56 @@ async function collectBin({ binId, worker }) {
     throw mapSupabaseError(error, 'Failed to update bin status.');
   }
 
+  console.log('[COLLECTION_SUCCESS]', {
+    binId,
+    workerId: worker.id,
+    binStatus: 'empty',
+    timestamp: nowIso,
+  });
+
+  let collectionTracked = false;
   const { error: collectionError } = await supabase.from('collections').insert({
     bin_id: bin.id,
     worker_id: worker.id,
     collected_at: nowIso,
     worker_lat: workerLat,
     worker_lng: workerLng,
-    bin_lat: Number(bin.lat),
-    bin_lng: Number(bin.lng),
+    bin_lat: binLat,
+    bin_lng: binLng,
     distance_meters: Math.round(proximityMeters * 100) / 100,
   });
 
-  if (collectionError) throw mapSupabaseError(collectionError, 'Failed to save collection record.');
+  if (collectionError) {
+    console.error('[COLLECTION_TRACKING_ERROR]', {
+      binId,
+      workerId: worker.id,
+      error: collectionError.message,
+      code: collectionError.code,
+      details: collectionError,
+    });
+    console.warn('[COLLECTION_WARNING] Bin collection successful but tracking failed. Continuing without logging.');
+  } else {
+    collectionTracked = true;
+  }
 
-  await logWorker({ workerId: worker.id, action: 'BIN_COLLECTED', binId: binId, details: { zoneId: bin.zone_id } });
-  await logActivity({
-    userId: worker.id,
-    actionType: 'BIN_COLLECTED',
-    entityType: 'bin',
-    entityId: binId,
-    metadata: { zoneId: bin.zone_id, distanceMeters: Math.round(proximityMeters * 100) / 100 },
-  });
+  // Log the collection regardless of tracking success
+  try {
+    await logWorker({ workerId: worker.id, action: 'BIN_COLLECTED', binId: binId, details: { zoneId: bin.zone_id } });
+  } catch (logError) {
+    console.error('[WORKER_LOG_ERROR]', { workerId: worker.id, error: logError.message });
+  }
+
+  try {
+    await logActivity({
+      userId: worker.id,
+      actionType: 'BIN_COLLECTED',
+      entityType: 'bin',
+      entityId: binId,
+      metadata: { zoneId: bin.zone_id, distanceMeters: Math.round(proximityMeters * 100) / 100, collectionTracked },
+    });
+  } catch (logError) {
+    console.error('[ACTIVITY_LOG_ERROR]', { userId: worker.id, error: logError.message });
+  }
 
   return data;
 }
@@ -244,7 +334,7 @@ async function updateBinStatus({ binId, status, fillLevel, updatedBy, user }) {
   if (currentBinError) throw mapSupabaseError(currentBinError, 'Failed to validate bin.');
 
   if (user?.role === 'worker') {
-    const zoneIds = await getWorkerZoneIds(user.id);
+    const zoneIds = await getWorkerZoneFilterIds(user);
     if (!zoneIds.includes(currentBin.zone_id)) {
       throw new AppError('You can only update bins in your assigned zones.', 403);
     }
@@ -296,6 +386,70 @@ async function listNearbyBins({ lat, lng, radiusKm = 6 }) {
   );
 }
 
+async function optimizeCollectionRoute({ worker, workerLat, workerLng }) {
+  // Reuse the existing worker-zone filter, then visit the nearest remaining
+  // full bin at each step to produce a simple, maintainable route order.
+  const startLat = Number.isFinite(Number(workerLat)) ? Number(workerLat) : Number(worker.location_lat);
+  const startLng = Number.isFinite(Number(workerLng)) ? Number(workerLng) : Number(worker.location_lng);
+
+  if (!Number.isFinite(startLat) || !Number.isFinite(startLng)) {
+    throw new AppError('Worker location unavailable. Share live location before optimizing route.', 400);
+  }
+
+  const bins = await listBinsForUser(worker);
+  const remaining = bins.filter(
+    (bin) =>
+      bin.status === 'full' &&
+      Number.isFinite(Number(bin.lat)) &&
+      Number.isFinite(Number(bin.lng))
+  );
+
+  if (!remaining.length) {
+    return { route: [], totalBins: 0, totalDistanceKm: 0 };
+  }
+
+  const route = [];
+  let totalDistanceKm = 0;
+  let currentLat = startLat;
+  let currentLng = startLng;
+
+  while (remaining.length) {
+    let bestIndex = 0;
+    let bestDistanceMeters = distanceMeters(currentLat, currentLng, Number(remaining[0].lat), Number(remaining[0].lng));
+
+    for (let index = 1; index < remaining.length; index += 1) {
+      const candidate = remaining[index];
+      const candidateDistance = distanceMeters(currentLat, currentLng, Number(candidate.lat), Number(candidate.lng));
+      const bestCandidate = remaining[bestIndex];
+
+      if (
+        candidateDistance < bestDistanceMeters ||
+        (candidateDistance === bestDistanceMeters && String(candidate.label || '').localeCompare(String(bestCandidate.label || '')) < 0)
+      ) {
+        bestIndex = index;
+        bestDistanceMeters = candidateDistance;
+      }
+    }
+
+    const [nextBin] = remaining.splice(bestIndex, 1);
+    totalDistanceKm += bestDistanceMeters / 1000;
+
+    route.push({
+      ...nextBin,
+      distanceFromPrev: Number((bestDistanceMeters / 1000).toFixed(2)),
+    });
+
+    currentLat = Number(nextBin.lat);
+    currentLng = Number(nextBin.lng);
+  }
+
+  return {
+    route,
+    totalBins: route.length,
+    totalDistanceKm: Number(totalDistanceKm.toFixed(2)),
+  };
+}
+
 async function runBinFillSimulationTick() {
   const { data, error } = await supabase
     .from('bins')
@@ -340,10 +494,12 @@ module.exports = {
   FILL_DURATION_MINUTES,
   COLLECTION_RADIUS_METERS,
   listBinsForUser,
+  listBinsForWorker,
   addBin,
   removeBin,
   collectBin,
   updateBinStatus,
   listNearbyBins,
+  optimizeCollectionRoute,
   runBinFillSimulationTick,
 };

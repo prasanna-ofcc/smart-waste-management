@@ -3,7 +3,7 @@ const jwt = require('jsonwebtoken');
 const { AppError } = require('../utils/errors');
 const { getUserByEmail, getUserById, sanitizeUser, createPublicUser, updateUserPasswordHash, updateUserProfile } = require('./userService');
 const { logActivity } = require('./activityService');
-const { getAssignedZonesForWorker } = require('./zoneService');
+const { getAssignedZonesForWorker, getWorkerPrimaryZoneId } = require('./zoneService');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'replace_this_secret';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '8h';
@@ -73,10 +73,14 @@ async function getProfile(id) {
     phone: safeUser.phone,
     role: safeUser.role,
     profile_image: safeUser.profile_image || null,
+    location_lat: safeUser.location_lat,
+    location_lng: safeUser.location_lng,
   };
 
   if (safeUser.role === 'worker') {
     profile.assigned_zones = await getAssignedZonesForWorker(safeUser.id);
+    profile.zone_id = await getWorkerPrimaryZoneId(safeUser.id);
+    profile.assignment_status = profile.zone_id ? 'Active' : 'Unassigned';
   }
 
   return profile;

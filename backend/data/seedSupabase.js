@@ -88,6 +88,31 @@ async function seedWorkerAssignments(worker1Id, worker2Id, srirangamId, thillaiI
 
   const { error } = await supabase.from(mappingTable).upsert(payload, { onConflict: 'worker_id,zone_id' });
   if (error) throw error;
+
+  const { error: workerUpdateError } = await supabase.from('users').upsert([
+    { id: worker1Id, zone_id: srirangamId, worker_status: 'active' },
+    { id: worker2Id, zone_id: thillaiId, worker_status: 'active' },
+  ]);
+
+  // Safer: perform explicit updates to avoid inserting partial user rows
+  // (which can violate NOT NULL constraints like `name`). Use update() when
+  // we have the user ids, otherwise throw a clear error so the seed doesn't
+  // attempt an insert with missing fields.
+  if (!worker1Id || !worker2Id) {
+    throw new Error('Worker IDs not found when assigning zones. Ensure users were seeded correctly.');
+  }
+
+  const { error: update1 } = await supabase
+    .from('users')
+    .update({ zone_id: srirangamId, worker_status: 'active' })
+    .eq('id', worker1Id);
+  if (update1) throw update1;
+
+  const { error: update2 } = await supabase
+    .from('users')
+    .update({ zone_id: thillaiId, worker_status: 'active' })
+    .eq('id', worker2Id);
+  if (update2) throw update2;
 }
 
 async function seedBins(adminId, zoneMap) {
@@ -143,6 +168,12 @@ async function main() {
   const admin = await getUserByEmail('admin@test.com');
   const worker1 = await getUserByEmail('worker1@test.com');
   const worker2 = await getUserByEmail('worker2@test.com');
+
+  await supabase
+    .from('users')
+    .update({ location_lat: 10.8173, location_lng: 78.6824 })
+    .eq('id', worker2.id)
+    .eq('role', 'worker');
 
   await seedZones(admin.id);
 

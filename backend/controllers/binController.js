@@ -1,5 +1,5 @@
 const asyncHandler = require('../utils/asyncHandler');
-const { listBinsForUser, collectBin, updateBinStatus, listNearbyBins, addBin, removeBin } = require('../services/binService');
+const { listBinsForUser, collectBin, updateBinStatus, listNearbyBins, optimizeCollectionRoute, addBin, removeBin } = require('../services/binService');
 
 const listBins = asyncHandler(async (req, res) => {
   const bins = await listBinsForUser(req.user);
@@ -33,6 +33,13 @@ const nearby = asyncHandler(async (req, res) => {
   res.json(bins);
 });
 
+const optimizeRoute = asyncHandler(async (req, res) => {
+  const workerLat = req.query.workerLat;
+  const workerLng = req.query.workerLng;
+  const result = await optimizeCollectionRoute({ worker: req.user, workerLat, workerLng });
+  res.json(result);
+});
+
 const create = asyncHandler(async (req, res) => {
   const { label, location, lat, lng, zone_id, zoneId } = req.body;
   const bin = await addBin({
@@ -53,4 +60,4 @@ const remove = asyncHandler(async (req, res) => {
   res.json({ message: 'Bin removed.', bin });
 });
 
-module.exports = { listBins, collect, patchStatus, nearby, create, remove };
+module.exports = { listBins, collect, patchStatus, nearby, optimizeRoute, create, remove };

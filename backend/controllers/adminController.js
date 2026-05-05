@@ -21,7 +21,7 @@ const getWorkers = asyncHandler(async (_req, res) => {
 const getAdminEvents = asyncHandler(async (_req, res) => {
   const { data, error } = await supabase
     .from('worker_logs')
-    .select('id,worker_id,bin_id,action,created_at')
+    .select('id,worker_id,bin_id,action,created_at,users(name)')
     .eq('action', 'BIN_COLLECTED')
     .order('created_at', { ascending: false })
     .limit(100);
@@ -31,6 +31,7 @@ const getAdminEvents = asyncHandler(async (_req, res) => {
   const events = data.map((row) => ({
     id: row.id,
     workerId: row.worker_id,
+    workerName: row.users?.name || null,
     binLabel: row.bin_id,
     timestamp: row.created_at,
   }));

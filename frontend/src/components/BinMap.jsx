@@ -7,15 +7,15 @@
 //   • Admin "add bin" click mode
 //   • Route polyline
 // ============================================================
-import React, { useEffect, useCallback, useState } from 'react';
+import React, { useEffect, useCallback, useState, useRef } from 'react';
 import {
-  MapContainer, TileLayer, Marker, Popup, Polyline, useMap, useMapEvents,
+  MapContainer, TileLayer, Marker, Popup, CircleMarker, useMap, useMapEvents,
 } from 'react-leaflet';
 import L from 'leaflet';
 import toast from 'react-hot-toast';
 import api from '../services/api';
 
-const COLLECTION_RADIUS_METERS = 10;
+const COLLECTION_RADIUS_METERS = 50;
 
 function hasValidCoords(lat, lng) {
   return Number.isFinite(Number(lat)) && Number.isFinite(Number(lng));
@@ -93,6 +93,34 @@ function addBinCursorIcon() {
   return L.divIcon({ html: svg, className: '', iconSize: [30, 40], iconAnchor: [15, 40] });
 }
 
+function RouteLayer({ routeLatLng }) {
+  const map = useMap();
+  const layerRef = useRef(null);
+
+  useEffect(() => {
+    if (layerRef.current) {
+      map.removeLayer(layerRef.current);
+      layerRef.current = null;
+    }
+
+    if (!routeLatLng?.length) return;
+
+    const layer = L.polyline(routeLatLng, {
+      color: '#2563eb',
+      weight: 5,
+    }).addTo(map);
+
+    layerRef.current = layer;
+    try {
+      map.fitBounds(layer.getBounds(), { padding: [24, 24] });
+    } catch (err) {
+      console.warn('[ROUTE_FIT_BOUNDS_FAILED]', err?.message || err);
+    }
+  }, [map, routeLatLng]);
+
+  return null;
+}
+
 // ── Map click handler (admin add-bin mode) ───────────────
 function MapClickHandler({ addBinMode, onMapClick }) {
   useMapEvents({
@@ -120,6 +148,10 @@ export default function BinMap({
 }) {
   const CENTER = mapCenter || [10.8700, 78.6950]; // midpoint Thillai + Samayapuram
   const [collectingId, setCollectingId] = useState(null);
+  const [roadRoute, setRoadRoute] = useState([]);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [routeError, setRouteError] = useState('');
+  const routeCacheRef = useRef(new Map());
 
   const binsWithCoords = bins.filter((bin) => hasValidCoords(bin.lat, bin.lng));
   const workersWithCoords = workers.filter((worker) => hasValidCoords(worker?.location?.lat, worker?.location?.lng));
@@ -127,12 +159,64 @@ export default function BinMap({
 
   // Route polyline
   const activeWorker = workersWithCoords.find((w) => w.id === activeWorkerId);
-  const routeCoords = showRoute && route.length && activeWorker
-    ? [
-        [activeWorker.location.lat, activeWorker.location.lng],
-        ...route.map(b => [b.lat, b.lng]),
-      ]
-    : [];
+  const routeCoords = showRoute && roadRoute.length ? roadRoute : [];
+
+  useEffect(() => {
+    const coords = showRoute && route.length && activeWorker
+      ? [
+          [activeWorker.location.lng, activeWorker.location.lat],
+          ...route.map((b) => [Number(b.lng), Number(b.lat)]),
+        ]
+      : [];
+
+    if (!showRoute || coords.length < 2) {
+      setRoadRoute([]);
+      setRouteError('');
+      setRouteLoading(false);
+      return;
+    }
+
+    const cacheKey = JSON.stringify(coords);
+    const cached = routeCacheRef.current.get(cacheKey);
+    if (cached) {
+      setRoadRoute(cached);
+      setRouteError('');
+      setRouteLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const fetchRoute = async () => {
+      setRouteLoading(true);
+      setRouteError('');
+      console.log('Sending coordinates:', coords);
+      try {
+        const res = await api.post('/route', { coordinates: coords }, { signal: controller.signal });
+        const data = res?.data;
+        console.log('ORS response:', data);
+        if (!data?.features?.length) {
+          console.error('No route returned', data);
+          throw new Error('No route returned');
+        }
+        const geometry = data.features[0]?.geometry?.coordinates || [];
+        if (!geometry.length) throw new Error('Routing response missing geometry.');
+        const latLngs = geometry.map(([lng, lat]) => [lat, lng]);
+
+        routeCacheRef.current.set(cacheKey, latLngs);
+        setRoadRoute(latLngs);
+      } catch (err) {
+        if (err?.name === 'AbortError') return;
+        console.error('[ROUTE_ERROR]', err);
+        setRouteError('Failed to load road route.');
+        setRoadRoute([]);
+      } finally {
+        setRouteLoading(false);
+      }
+    };
+
+    fetchRoute();
+    return () => controller.abort();
+  }, [showRoute, route, activeWorker]);
 
   const handleCollect = async (bin) => {
     if (bin.status !== 'full') return toast('Already empty!', { icon: '✅' });
@@ -149,9 +233,30 @@ export default function BinMap({
       Number(bin.lat),
       Number(bin.lng)
     );
+    
+    console.log('[COLLECT_FRONTEND_DEBUG]', {
+      binId: bin.id,
+      workerCoords: { lat: myWorker.location.lat, lng: myWorker.location.lng },
+      binCoords: { lat: bin.lat, lng: bin.lng },
+      calculatedDistanceMeters: Math.round(meters * 100) / 100,
+      thresholdMeters: COLLECTION_RADIUS_METERS,
+      isWithinThreshold: meters <= COLLECTION_RADIUS_METERS,
+    });
+    
     if (meters > COLLECTION_RADIUS_METERS) {
-      toast.error('Move closer to the bin to collect.');
+      toast.error(`Too far from bin. Distance: ${Math.round(meters)} meters. Max allowed: ${COLLECTION_RADIUS_METERS} meters.`);
       return;
+    }
+
+    // Force-sync worker location to server before attempting collect to avoid
+    // server-side 'too far' errors caused by stale server coordinates.
+    if (onWorkerMove) {
+      try {
+        // pass `true` to indicate immediate sync
+        await onWorkerMove(myWorker.location.lat, myWorker.location.lng, true);
+      } catch (e) {
+        console.warn('[FORCE_SYNC_LOCATION_FAILED]', e?.message || e);
+      }
     }
 
     setCollectingId(bin.id);
@@ -162,8 +267,10 @@ export default function BinMap({
         fillPercent: typeof res.data.bin.fill_level === 'number' ? res.data.bin.fill_level : 0,
       } : b));
       toast.success(`✅ ${getSafeLabel(bin.label)} collected!`);
-    } catch { toast.error('Failed to collect bin.'); }
-    finally { setCollectingId(null); }
+    } catch (err) {
+      console.error('[COLLECT_ERROR]', err?.response?.data || err?.message || err);
+      toast.error('Failed to collect bin.');
+    } finally { setCollectingId(null); }
   };
 
   return (
@@ -181,9 +288,17 @@ export default function BinMap({
       {/* Map click for add-bin mode */}
       <MapClickHandler addBinMode={addBinMode} onMapClick={onAddBin} />
 
-      {/* Route polyline */}
-      {routeCoords.length > 1 && (
-        <Polyline positions={routeCoords} color="#3b82f6" weight={3} opacity={0.85} dashArray="8 4" />
+      {/* Route polyline (road-based) */}
+      {routeCoords.length > 1 && <RouteLayer routeLatLng={routeCoords} />}
+      {showRoute && routeLoading && (
+        <div className="map-overlay-panel" style={{ position: 'absolute', top: 12, right: 12, fontSize: 11 }}>
+          Routing...
+        </div>
+      )}
+      {showRoute && routeError && (
+        <div className="map-overlay-panel" style={{ position: 'absolute', top: 12, right: 12, fontSize: 11, color: 'var(--red)' }}>
+          {routeError}
+        </div>
       )}
 
       {/* Worker markers */}
@@ -192,35 +307,48 @@ export default function BinMap({
         const workerLat = Number(worker?.location?.lat);
         const workerLng = Number(worker?.location?.lng);
         return (
-          <Marker
-            key={worker.id}
-            position={[workerLat, workerLng]}
-            icon={workerIcon(worker.avatar, isMe)}
-            draggable={isMe && (role === 'worker')}
-            eventHandlers={isMe && role === 'worker' ? {
-              dragend: (e) => {
-                const { lat, lng } = e.target.getLatLng();
-                onWorkerMove?.(lat, lng);
-              },
-            } : {}}
-          >
-            <Popup>
-              <div className="bin-popup">
-                <div className="bin-popup-header">{worker.avatar} {worker.name}</div>
-                <div className="bin-popup-row">
-                  <span>Zone</span>
-                  <span style={{ color: 'var(--blue)' }}>{worker.zone || 'On duty'}</span>
+          <React.Fragment key={worker.id}>
+            <CircleMarker
+              center={[workerLat, workerLng]}
+              radius={isMe ? 12 : 9}
+              pathOptions={{
+                color: isMe ? '#3b82f6' : '#6b7280',
+                weight: 2,
+                fillColor: isMe ? '#3b82f6' : '#6b7280',
+                fillOpacity: 0.2,
+              }}
+            />
+              <Marker
+              position={[workerLat, workerLng]}
+              icon={workerIcon(worker.avatar, isMe)}
+              zIndexOffset={1500}
+              draggable={isMe && (role === 'worker')}
+              eventHandlers={isMe && role === 'worker' ? {
+                dragend: (e) => {
+                  const { lat, lng } = e.target.getLatLng();
+                  // force immediate sync on dragend for accurate server-side checks
+                  onWorkerMove?.(lat, lng, true);
+                },
+              } : {}}
+            >
+              <Popup>
+                <div className="bin-popup">
+                  <div className="bin-popup-header">{worker.avatar} {worker.name}</div>
+                  <div className="bin-popup-row">
+                    <span>Zone</span>
+                    <span style={{ color: 'var(--blue)' }}>{worker.zone || 'On duty'}</span>
+                  </div>
+                  <div className="bin-popup-row">
+                    <span>Position</span>
+                    <span style={{ fontSize: 10 }}>
+                      {workerLat.toFixed(4)}, {workerLng.toFixed(4)}
+                    </span>
+                  </div>
+                  {isMe && <p style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>Drag to move your location</p>}
                 </div>
-                <div className="bin-popup-row">
-                  <span>Position</span>
-                  <span style={{ fontSize: 10 }}>
-                    {workerLat.toFixed(4)}, {workerLng.toFixed(4)}
-                  </span>
-                </div>
-                {isMe && <p style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>Drag to move your location</p>}
-              </div>
-            </Popup>
-          </Marker>
+              </Popup>
+            </Marker>
+          </React.Fragment>
         );
       })}
 
@@ -237,7 +365,7 @@ export default function BinMap({
               Number(bin.lng)
             )
           : null;
-        const canCollectByDistance = inRangeMeters != null && inRangeMeters <= COLLECTION_RADIUS_METERS;
+        const canCollectByDistance = inRangeMeters != null && inRangeMeters <= COLLECTION_RADIUS_METERS; // Distance check: 50m threshold
         const canCollect = role === 'worker' && canCollectByDistance && bin.status === 'full';
         return (
           <Marker

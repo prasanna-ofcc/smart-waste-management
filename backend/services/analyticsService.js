@@ -63,8 +63,88 @@ async function getRequestStats() {
   };
 }
 
+function buildDateSeries(keys, countsMap) {
+  return keys.map((key) => ({
+    date: key,
+    count: countsMap.get(key) || 0,
+  }));
+}
+
+function buildLastNDaysKeys(days) {
+  const keys = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i -= 1) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    d.setUTCDate(d.getUTCDate() - i);
+    keys.push(d.toISOString().slice(0, 10));
+  }
+  return keys;
+}
+
+function buildLastNMonthsKeys(months) {
+  const keys = [];
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const month = now.getUTCMonth();
+  for (let i = months - 1; i >= 0; i -= 1) {
+    const d = new Date(Date.UTC(year, month - i, 1));
+    keys.push(d.toISOString().slice(0, 7));
+  }
+  return keys;
+}
+
+async function getCollectionSummary() {
+  const { data: logs, error } = await supabase
+    .from('worker_logs')
+    .select('id,worker_id,bin_id,action,created_at,users(name)')
+    .eq('action', 'BIN_COLLECTED')
+    .order('created_at', { ascending: false });
+
+  if (error) throw mapSupabaseError(error, 'Failed to fetch collection logs.');
+
+  const dayCounts = new Map();
+  const monthCounts = new Map();
+  const workerCounts = new Map();
+
+  const workerDetails = (logs || []).map((row) => {
+    const createdAt = new Date(row.created_at);
+    const dayKey = createdAt.toISOString().slice(0, 10);
+    const monthKey = createdAt.toISOString().slice(0, 7);
+
+    dayCounts.set(dayKey, (dayCounts.get(dayKey) || 0) + 1);
+    monthCounts.set(monthKey, (monthCounts.get(monthKey) || 0) + 1);
+
+    const workerKey = row.worker_id;
+    const existing = workerCounts.get(workerKey) || { workerId: workerKey, workerName: row.users?.name || 'Unknown', total: 0 };
+    existing.total += 1;
+    if (row.users?.name) existing.workerName = row.users.name;
+    workerCounts.set(workerKey, existing);
+
+    return {
+      id: row.id,
+      workerId: row.worker_id,
+      workerName: row.users?.name || 'Unknown',
+      binId: row.bin_id,
+      collectedAt: row.created_at,
+      dayKey,
+      monthKey,
+    };
+  });
+
+  const dayKeys = buildLastNDaysKeys(30);
+  const monthKeys = buildLastNMonthsKeys(12);
+
+  return {
+    dayWise: buildDateSeries(dayKeys, dayCounts),
+    monthWise: buildDateSeries(monthKeys, monthCounts),
+    perWorker: Array.from(workerCounts.values()).sort((a, b) => b.total - a.total),
+    perWorkerDetails: workerDetails,
+  };
+}
+
 module.exports = {
   getWorkerPerformance,
   getBinUsage,
   getRequestStats,
+  getCollectionSummary,
 };

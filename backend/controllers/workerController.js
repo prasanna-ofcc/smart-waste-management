@@ -1,10 +1,16 @@
 const asyncHandler = require('../utils/asyncHandler');
 const { updateWorkerStatus, updateWorkerLocation, sanitizeUser, listWorkers } = require('../services/userService');
+const { listBinsForWorker } = require('../services/binService');
 const { listRequests, acceptRequest, completeRequest } = require('../services/requestService');
 
 const listAllWorkers = asyncHandler(async (_req, res) => {
   const workers = await listWorkers();
   res.json(workers);
+});
+
+const workerBins = asyncHandler(async (req, res) => {
+  const bins = await listBinsForWorker(req.user);
+  res.json(bins);
 });
 
 const setStatus = asyncHandler(async (req, res) => {
@@ -45,6 +51,7 @@ module.exports = {
   setStatus,
   setLocation,
   workerRequests,
+  workerBins,
   acceptWorkerRequest,
   completeWorkerRequest,
 };

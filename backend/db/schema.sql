@@ -11,6 +11,7 @@ create table if not exists users (
   worker_status text not null default 'inactive' check (worker_status in ('active', 'inactive')),
   location_lat double precision,
   location_lng double precision,
+  zone_id uuid references zones(id) on delete set null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -76,6 +77,9 @@ alter table if exists bins
 
 alter table if exists users
   add column if not exists profile_image text;
+
+alter table if exists users
+  add column if not exists zone_id uuid references zones(id) on delete set null;
 
 alter table if exists bins
   add column if not exists label text;
@@ -176,6 +180,7 @@ create table if not exists collections (
 );
 
 create index if not exists idx_users_role on users(role);
+create index if not exists idx_users_zone on users(zone_id);
 create index if not exists idx_bins_zone on bins(zone_id);
 create index if not exists idx_requests_status on requests(status);
 create index if not exists idx_requests_type on requests(request_type);

@@ -1,17 +1,23 @@
 create extension if not exists pgcrypto;
 
--- 1) Seed fixed users
-insert into users (name, email, password_hash, role, worker_status)
+-- Ensure compatibility with older schemas: add `zone_id` to `users` if missing.
+-- This avoids seed failures when `users.zone_id` does not exist in the target DB.
+alter table users add column if not exists zone_id uuid;
+
+-- 1) Seed fixed users with initial locations
+insert into users (name, email, password_hash, role, worker_status, location_lat, location_lng)
 values
-  ('Admin', 'admin@test.com', crypt('123456', gen_salt('bf')), 'admin', 'inactive'),
-  ('Worker 1', 'worker1@test.com', crypt('123456', gen_salt('bf')), 'worker', 'active'),
-  ('Worker 2', 'worker2@test.com', crypt('123456', gen_salt('bf')), 'worker', 'active')
+  ('Admin', 'admin@test.com', crypt('123456', gen_salt('bf')), 'admin', 'inactive', 10.8700, 78.6950),
+  ('Worker 1', 'worker1@test.com', crypt('123456', gen_salt('bf')), 'worker', 'active', 10.8623, 78.6938),
+  ('Worker 2', 'worker2@test.com', crypt('123456', gen_salt('bf')), 'worker', 'active', 10.8173, 78.6824)
 on conflict (email) do update
 set
   name = excluded.name,
   password_hash = excluded.password_hash,
   role = excluded.role,
   worker_status = excluded.worker_status,
+  location_lat = excluded.location_lat,
+  location_lng = excluded.location_lng,
   updated_at = now();
 
 -- 2) Seed zones (radius 6 km)
@@ -28,16 +34,31 @@ set
   center_lng = excluded.center_lng,
   radius_km = excluded.radius_km;
 
--- 3) Assign workers to zones (many-to-many ready)
-insert into worker_zones (worker_id, zone_id, assigned_by)
-select u.id, z.id, a.id
-from users u
-join zones z on (
-  (u.email = 'worker1@test.com' and z.name = 'Srirangam') or
-  (u.email = 'worker2@test.com' and z.name = 'Thillai Nagar')
+-- 3) Assign workers to zones (many-to-many) and update their zone_id
+with worker_assignments as (
+  select u.id as worker_id, z.id as zone_id, a.id as assigned_by
+  from users u
+  join zones z on (
+    (u.email = 'worker1@test.com' and z.name = 'Srirangam') or
+    (u.email = 'worker2@test.com' and z.name = 'Thillai Nagar')
+  )
+  left join users a on a.email = 'admin@test.com'
 )
-left join users a on a.email = 'admin@test.com'
+insert into worker_zones (worker_id, zone_id, assigned_by)
+select worker_id, zone_id, assigned_by from worker_assignments
 on conflict (worker_id, zone_id) do nothing;
+
+-- Update user.zone_id to match their primary zone assignment (always update to ensure consistency)
+update users u
+set zone_id = (
+  select zone_id from worker_zones
+  where worker_id = u.id
+  limit 1
+),
+worker_status = 'active'
+where role = 'worker' and exists (
+  select 1 from worker_zones where worker_id = u.id
+);
 
 -- 4) Seed bins (20 total)
 delete from bins

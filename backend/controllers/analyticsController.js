@@ -1,5 +1,5 @@
 const asyncHandler = require('../utils/asyncHandler');
-const { getWorkerPerformance, getBinUsage, getRequestStats } = require('../services/analyticsService');
+const { getWorkerPerformance, getBinUsage, getRequestStats, getCollectionSummary } = require('../services/analyticsService');
 
 const workerPerformance = asyncHandler(async (_req, res) => {
   const stats = await getWorkerPerformance();
@@ -16,4 +16,9 @@ const requestStats = asyncHandler(async (_req, res) => {
   res.json(stats);
 });
 
-module.exports = { workerPerformance, binUsage, requestStats };
+const collectionSummary = asyncHandler(async (_req, res) => {
+  const summary = await getCollectionSummary();
+  res.json(summary);
+});
+
+module.exports = { workerPerformance, binUsage, requestStats, collectionSummary };

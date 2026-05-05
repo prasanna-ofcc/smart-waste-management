@@ -13,8 +13,8 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import BinMap from '../components/BinMap';
 import Sidebar from '../components/Sidebar';
 
-// How far each step moves (degrees ≈ 50 m)
-const STEP = 0.0005;
+// How far each step moves (degrees). Reduced for smoother movement (~20-25m)
+const STEP = 0.0002;
 
 function getBinDisplayLabel(bin) {
   const label = typeof bin?.label === 'string' ? bin.label : '';
@@ -30,9 +30,16 @@ function getSafeNumber(value, fallback = 0) {
 export default function WorkerPage() {
   const { user } = useAuth();
 
+  const initialLat = Number(user?.location_lat ?? user?.location?.lat ?? 10.8231);
+  const initialLng = Number(user?.location_lng ?? user?.location?.lng ?? 78.6872);
+  const fallbackLocation = {
+    lat: Number.isFinite(initialLat) ? initialLat : 10.8231,
+    lng: Number.isFinite(initialLng) ? initialLng : 78.6872,
+  };
+
   const [bins,        setBins]        = useState([]);
   const [workers,     setWorkers]     = useState([]);
-  const [myLocation,  setMyLocation]  = useState(user?.location || { lat: 10.8231, lng: 78.6872 });
+  const [myLocation,  setMyLocation]  = useState(fallbackLocation);
   const [route,       setRoute]       = useState([]);
   const [showRoute,   setShowRoute]   = useState(false);
   const [optimizing,  setOptimizing]  = useState(false);
@@ -46,34 +53,75 @@ export default function WorkerPage() {
 
   // ── Load initial data ──────────────────────────────────
   useEffect(() => {
-    Promise.all([api.get('/bins'), api.get('/workers')])
-      .then(([bRes, wRes]) => {
-        const normalizedBins = bRes.data.map((b) => ({
-          ...b,
-          fillPercent: typeof b.fill_level === 'number' ? b.fill_level : b.fillPercent || 0,
-        }));
+    console.log('[WORKER_DATA_LOAD] requesting /worker/bins and /workers');
+    Promise.allSettled([api.get('/worker/bins'), api.get('/workers')])
+      .then(([binsResult, workersResult]) => {
+        if (binsResult.status === 'fulfilled') {
+          console.log('[WORKER_DATA_LOAD] bins response', {
+            binsCount: Array.isArray(binsResult.value.data) ? binsResult.value.data.length : null,
+          });
+          const normalizedBins = (Array.isArray(binsResult.value.data) ? binsResult.value.data : []).map((b) => ({
+            ...b,
+            fillPercent: typeof b.fill_level === 'number' ? b.fill_level : b.fillPercent || 0,
+          }));
+          setBins(normalizedBins);
+        } else {
+          console.error('[WORKER_BINS_LOAD_ERROR]', binsResult.reason?.response?.data || binsResult.reason?.message || binsResult.reason);
+          setBins([]);
+        }
 
-        const normalizedWorkers = wRes.data.map((w) => ({
-          ...w,
-          avatar: (w.name || '?').slice(0, 1).toUpperCase(),
-          zone: w.zone || 'Assigned Zone',
-          location: {
-            lat: w.location_lat,
-            lng: w.location_lng,
-          },
-        }));
+        if (workersResult.status === 'fulfilled') {
+          console.log('[WORKER_DATA_LOAD] workers response', {
+            workersCount: Array.isArray(workersResult.value.data) ? workersResult.value.data.length : null,
+          });
+          const normalizedWorkers = (Array.isArray(workersResult.value.data) ? workersResult.value.data : []).map((w) => ({
+            ...w,
+            avatar: (w.name || '?').slice(0, 1).toUpperCase(),
+            zone: w.zone || (w.zone_id ? 'Assigned Zone' : 'Unassigned'),
+            assignmentStatus: w.assignment_status || (w.zone_id ? 'Active' : 'Unassigned'),
+            location: {
+              lat: w.location_lat,
+              lng: w.location_lng,
+            },
+          }));
 
-        setBins(normalizedBins);
-        setWorkers(normalizedWorkers);
-        // Init own location from server
-        const me = normalizedWorkers.find((w) => w.id === user.id);
-        if (me?.location?.lat != null && me?.location?.lng != null) {
-          setMyLocation(me.location);
+          const hasSelfWorker = normalizedWorkers.some((w) => w.id === user.id);
+          if (!hasSelfWorker) {
+            normalizedWorkers.push({
+              id: user.id,
+              name: user.name || 'You',
+              avatar: (user.name || '?').slice(0, 1).toUpperCase(),
+              zone: 'Assigned Zone',
+              assignmentStatus: 'Active',
+              location: fallbackLocation,
+            });
+          }
+
+          setWorkers(normalizedWorkers);
+
+          // Init own location from server
+          const me = normalizedWorkers.find((w) => w.id === user.id);
+          if (me?.location?.lat != null && me?.location?.lng != null) {
+            setMyLocation(me.location);
+          }
+        } else {
+          console.error('[WORKERS_LOAD_ERROR]', workersResult.reason?.response?.data || workersResult.reason?.message || workersResult.reason);
+          setWorkers([{
+            id: user.id,
+            name: user.name || 'You',
+            avatar: (user.name || '?').slice(0, 1).toUpperCase(),
+            zone: 'Assigned Zone',
+            assignmentStatus: 'Active',
+            location: myLocation,
+          }]);
         }
       })
-      .catch(() => toast.error('Failed to load data.'))
+      .catch((err) => {
+        console.error('[WORKER_DATA_LOAD_FATAL]', err?.response?.data || err?.message || err);
+        toast.error('Failed to load data.');
+      })
       .finally(() => setLoadingBins(false));
-  }, [user.id]);
+  }, [user.id, user.name]);
 
   // ── WebSocket handler ─────────────────────────────────
   const handleWs = useCallback((msg) => {
@@ -100,14 +148,34 @@ export default function WorkerPage() {
   useWebSocket(handleWs);
 
   // ── Push location to server ───────────────────────────
-  const pushLocation = useCallback(async (lat, lng) => {
+  // Debounced location sync: update UI immediately, send network request after short delay.
+  const locationTimerRef = useRef(null);
+  const pushLocation = useCallback(async (lat, lng, force = false) => {
     setMyLocation({ lat, lng });
-    setWorkers(prev => prev.map(w => w.id === user.id ? { ...w, location: { lat, lng } } : w));
-    try {
-      await api.patch('/workers/me/location', { lat, lng });
-    } catch {
-      toast.error('Location sync failed.');
+
+    // If force, send immediately (used for collect/dragend). Otherwise debounce.
+    if (force) {
+      if (locationTimerRef.current) {
+        clearTimeout(locationTimerRef.current);
+        locationTimerRef.current = null;
+      }
+      try {
+        await api.patch('/workers/me/location', { lat, lng });
+      } catch {
+        toast.error('Location sync failed.');
+      }
+      return;
     }
+
+    if (locationTimerRef.current) clearTimeout(locationTimerRef.current);
+    locationTimerRef.current = setTimeout(async () => {
+      try {
+        await api.patch('/workers/me/location', { lat, lng });
+      } catch {
+        toast.error('Location sync failed.');
+      }
+      locationTimerRef.current = null;
+    }, 300);
   }, [user.id]);
 
   // ── Arrow key movement ────────────────────────────────
@@ -317,7 +385,7 @@ export default function WorkerPage() {
                       </div>
                       <div style={{ fontSize: 10, color: 'var(--text-dim)' }}>{w.zone}</div>
                     </div>
-                    <span className="status-badge status-empty" style={{ marginLeft: 'auto', fontSize: 9 }}>● Active</span>
+                    <span className={`status-badge ${w.assignmentStatus === 'Active' ? 'status-empty' : 'status-pending'}`} style={{ marginLeft: 'auto', fontSize: 9 }}>● {w.assignmentStatus}</span>
                   </div>
                 ))}
               </div>
